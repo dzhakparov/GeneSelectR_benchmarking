@@ -4,3 +4,5 @@
 .Ruserdata
 data/clinical.csv
 data/melanoma_data.rds
+raw-data/TCGA-BRCA/
+raw-data/normalized_vst_matrix.csv
