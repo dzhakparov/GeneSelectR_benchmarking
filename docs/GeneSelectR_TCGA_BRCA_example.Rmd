@@ -1,0 +1,466 @@
+---
+title: "GeneSelectR Application on TCGA-BRCA Dataset"
+author: "Damir Zhakparov"
+date: "`r Sys.Date()`"
+output:
+  word_document:
+    toc: yes
+    toc_depth: '2'
+  pdf_document:
+    toc: yes
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      eval = TRUE,
+                      collapse = TRUE,
+                      comment = "#>", 
+                      cache = TRUE,
+                      warning = FALSE)
+```
+
+
+# Introduction
+
+This tutorial walks you through the use of `GeneSelectR` with the **TCGA-BRCA RNA Expression dataset** from The Cancer Genome Atlas. To acquire the dataset, we employed the [`TCGAbiolinks`](link-to-TCGAbiolinks) R package. For a step-by-step guide on data extraction, consult this [script](link-to-script).
+
+## Biological Question
+
+The primary aim of this tutorial is to identify a transcriptomic signature specific to each molecular subtype of breast cancer as defined by PAM50 markers. By doing so, we hope to shed light on the unique molecular mechanisms underlying each subtype, which could subsequently inform targeted therapeutic strategies and prognostic assessments.
+
+## Dataset Overview
+
+In this guide, we focus on a subset of **380 samples**, all categorized under the **'Primary Solid Tumor'** type and labeled with **PAM50 markers**: Basal(n = 80), Her2(n = 38), LumA(n = 188), and LumB (n = 74). The analysis encompasses all **60,600 sequenced transcripts**. For an in-depth look at the TCGA-BRCA dataset, please visit the [official documentation](link-to-official-documentation). The data files used in the tutorial can be accessed [here]().
+
+## Molecular Subtypes Overview
+
+### Basal-like
+
+- **Characteristics**: Triple Negative (HR-, HER2-), high levels of Ki-67
+- **Prognosis**: Poor
+- **Common Treatments**: Chemotherapy
+
+### HER2-enriched
+
+- **Characteristics**: HER2 Positive (HER2+), Hormone Receptor Negative (HR-)
+- **Prognosis**: Intermediate
+- **Common Treatments**: HER2-targeted therapies like trastuzumab
+
+### Luminal A
+
+- **Characteristics**: Hormone Receptor Positive (HR+), low levels of HER2 and Ki-67
+- **Prognosis**: Best among the subtypes
+- **Common Treatments**: Hormone therapy
+
+### Luminal B
+
+- **Characteristics**: Hormone Receptor Positive (HR+), higher levels of HER2 and Ki-67
+- **Prognosis**: Worse than Luminal A but better than Basal-like
+- **Common Treatments**: Hormone therapy, may require chemotherapy
+
+By understanding the unique transcriptomic landscape of each subtype, we can better predict disease outcomes and tailor treatment regimens.
+
+# 1. Differential Gene Expression Analysis 
+As a baseline differential gene expression analysis (DGE) provides a good starting point. First of all we will load the dataset and metadata files and import necessart packages: 
+
+```{r message=FALSE, echo=FALSE}
+# load necessary packages for the session and define conda environment 
+GeneSelectR::set_reticulate_python()
+library(dplyr)
+library(GeneSelectR)
+library(DESeq2)
+library(ggplot2)
+```
+```{r}
+# set up working directories 
+data_dir <- file.path('../raw-data')
+output_dir <- file.path('../results')
+
+#load the files 
+sample_metadata <- readRDS(file.path(data_dir, 'sample_metadata.rds'))
+raw_counts <- readRDS(file.path(data_dir, 'raw_counts.rds'))
+```
+
+After that we will create a DESEq2 object and then filter out genes with low counts: 
+```{r message=FALSE}
+dds <- DESeqDataSetFromMatrix(countData = raw_counts,
+                              colData = sample_metadata,
+                              design = ~ paper_BRCA_Subtype_PAM50)
+
+# filter the low counts
+table(sample_metadata$paper_BRCA_Subtype_PAM50)
+smallestGroupSize <- 38 #smallest group is 38 samples
+keep <- rowSums(counts(dds) >= 10) >= smallestGroupSize
+dds <- dds[keep,]
+```
+
+```{r echo = FALSE, message=FALSE}
+dds <- DESeq(dds)
+```
+
+Before performing the DGE analysis it's strongly advised to perform PCA on normalized counts to see if there any batch effects. We can do it by running: 
+```{r message=FALSE, echo=FALSE}
+norm_counts <- counts(dds, normalized=TRUE)
+log_norm_counts <- log2(norm_counts + 1)
+pca_res_normalized <- prcomp(t(log_norm_counts), center = TRUE, scale. = FALSE)
+```
+And then plotting: 
+```{r message=FALSE, echo=FALSE}
+explained_var <- round(100 * (pca_res_normalized$sdev^2 / sum(pca_res_normalized$sdev^2)), 1)
+ggplot() +
+  geom_point(aes(x = pca_res_normalized$x[, 1], y = pca_res_normalized$x[, 2], color = sample_metadata$paper_BRCA_Subtype_PAM50)) +
+  labs(
+    x = paste0("PC1: ", explained_var[1], "% variance"),
+    y = paste0("PC2: ", explained_var[2], "% variance"),
+    title = "PCA of DESeq2 Normalized Counts"
+  ) + theme_minimal()
+```
+
+
+And now let's run the DGE analysis: 
+
+```{r eval = FALSE}
+# Run DESeq
+dds <- DESeq(dds)
+```
+
+After the calculations are done, let's filter out differentially expressed genes: 
+```{r}
+# Get DE results
+res <- results(dds)
+filtered_res <- subset(res, padj < 0.001 & abs(log2FoldChange) > log2(5))
+filtered_df <- as.data.frame(filtered_res)
+```
+
+And store it in a separate vector: 
+```{r}
+deg_list <- rownames(filtered_df)
+```
+
+
+# 2. Feature Selection with GeneSelectR 
+## 2.1 Data Preparation 
+GeneSelectR expects the data to be a matrix/dataframe where rows represent samples and columns are features. Please note that the dataset has to be normalized with between sample normalization prior to any analysis with the package. 
+So now we extract the vst-transformed matrix from our DESeq2 object for the feature selection: 
+```{r}
+# Extract VST (Variance-Stabilized Transformed) Data
+vsd <- vst(dds, blind = FALSE)  
+vsd_matrix <- assay(vsd)
+vsd_matrix <- t(vsd_matrix)
+```
+Then we will create a response vector y with sample labels: 
+```{r}
+sample_metadata <- sample_metadata[match(rownames(vsd_matrix),rownames(sample_metadata)), ]
+sample_metadata$paper_BRCA_Subtype_PAM50 <- as.factor(sample_metadata$paper_BRCA_Subtype_PAM50)
+sample_metadata$num_label <- as.integer(sample_metadata$paper_BRCA_Subtype_PAM50) # NOTE: the labels should be encoded with numeric values
+table(sample_metadata$num_label)
+```
+## 2.2 Running GeneSelectR 
+After preparing the data we are ready to run GeneSelectR: 
+```{r eval = FALSE}
+X <-  exp
+y <- sample_metadata %>% select(num_label)
+
+selection_results <- GeneSelectR(X, # gene expression matrix
+                                 y, # label vector 
+                                 njobs = -1, # number of cores to de deployes (-1 = all)
+                                 n_splits = 5, # number of train/test splits to perform 
+                                 max_features = 250, # max futures to be selected per FS method (only RF, Lasso and Univariate)
+                                 perform_test_split = TRUE, # if partition data into train and test 
+                                 scoring = 'accuracy', # scoring metric for optimization 
+                                 calculate_permutation_importance = TRUE, # whether to calculate permutation importance 
+                                 search_type = 'random', # type of grid search
+                                 n_iter = 150L) # number of hyperparameter combinations to be samples  
+```
+
+```{r echo = FALSE, message = FALSE}
+selection_results <- readRDS(file = file.path('../results/selection_results.rds'))
+```
+
+The ENSEMBL IDs contain a version number at the end, which is not convenient for further analysis. We can remove it by running: 
+
+```{r message=FALSE}
+convert_ensembl_to_symbol <- function(selection_results) {
+  target_slots <- c("inbuilt_feature_importance", "permutation_importance")
+  
+  for (slot_name in target_slots) {
+    slot_content <- slot(selection_results, slot_name)
+    
+    if (!is.null(slot_content)) {
+      new_slot_content <- lapply(names(slot_content), function(method) {
+        df <- slot_content[[method]]
+        
+        # Remove digits after the period in feature column
+        df$feature <- gsub("\\.\\d{2}", "", df$feature)
+        
+        # Convert Ensembl IDs to gene symbols
+        converted <- clusterProfiler::bitr(df$feature, fromType = "ENSEMBL", toType = "SYMBOL", OrgDb = 'org.Hs.eg.db')
+        
+        # Left join to preserve all original rows
+        return(merge(df, converted, by.x = "feature", by.y = "ENSEMBL", all.x = TRUE))
+      })
+      
+      names(new_slot_content) <- names(slot_content)
+      slot(selection_results, slot_name) <- new_slot_content
+    }
+  }
+  return(selection_results)
+}
+
+# Apply the function
+selection_results <- convert_ensembl_to_symbol(selection_results)
+```
+
+
+```{r echo = FALSE, message = FALSE}
+selection_results <- readRDS(file = file.path('../results/selection_results.rds'))
+```
+
+
+# 3. Results Inspection 
+After the analysis has been finished, we can look into the PipelineResults objects to inspect the results. For example if we call: 
+```{r}
+str(selection_results, max.level = 2)
+```
+We can see following slots in the Pipeline results object: 
+- best_pipeline - contains all the parameters for the best performing pipeline; 
+- cv_results - contains the entire output of the CV procedure during hyperparameter search; 
+- inbuilt_feature_importance - inbuilt feature importance with mean, std and rank for every feature across iterations;  
+- permutation_importance - permutation feature importance with mean, std and rank for every feature across iterations;  
+- cv_mean_scores - CV scores but agreggated into one dataframe with mean and sd of the optimization metrics scores;  
+- test_metrics - metrics (f1, recall, precision and accuracy) for the unseen test set. 
+Let's inspect some of the most interesting metrics for the evaluation. 
+
+## 3.1 Machine Learning Performance Metrics  
+First, let's explore the cross validation scores for every of our methods. We can inspect the CV mean performance by displaying the dataframe: 
+```{r}
+selection_results@cv_mean_score
+```
+We can see that boruta is slightly better in terms of CV performance, but all methods are somewhat comparable. In this case we can inspect the performance on unseen data that is stored in test_metrics slot: 
+```{r}
+selection_results@test_metrics
+```
+Again, boruta seems to be the best one, although marginally. We can produce a combined plot of all metrics by calling: 
+```{r echo=FALSE}
+plot_metrics(selection_results)
+```
+
+## 3.2 Feature Importance
+The next step is to inspect what are the most important features for every feature selection method. To plot the importance scores we will call the plot_feature_importance(). The function returns a list of plots demonstrating mean feature importance scores across different data splits, so we will store it in a separate object: 
+```{r fig.asp=3}
+plot_list <- plot_feature_importance(selection_results)
+plot_list
+```
+
+Interestingly, we can see that boruta has a lot of relevant genes to cancer as top features: ENSG00000010030 (ETV7), 	
+ENSG00000005156 (LIG3), ENSG00000006534 (ALDH3B1), ENSG00000005100 (DHX33). 
+ 
+## 3.3 Overlap between Gene Lists and DGE list 
+It might be interesting to see if there is any overlap between the feature selection lists also including the list of differentially expressed genes. 
+Let's first extract the list of DEGs: 
+```{r}
+deg_list <- rownames(filtered_df)
+```
+Then we can calculate the overlap coefficients and plot them: 
+```{r}
+#inspect overlap with DEGs
+overlap_degs <- calculate_overlap_coefficients(selection_results, custom_lists = list('DEGS' = deg_list))
+plot_overlap_heatmaps(overlap_degs)
+```
+We can see three different coefficients that calculate the list a bit differently. Since our lists are different in sizes, the most relevant one here is Overlap Coefficient. We can see that some of the permutation importance lists have similarities. For example, Lasso is quite similar to boruta and RandomForest. As for the DEGs list it's quite similar to the Univariate method, although this is somewhat expected. 
+
+We can also inspect whethere there is an overlap with the canonical PAM50 signature. To do so we can use the following code: 
+
+```{r}
+# load the PAM50 signature
+pam50 <- read.csv(file = file.path(data_dir, 'PAM50.txt'), sep = '\t', header = FALSE, col.names = c('SYMBOL')) 
+
+# convert to ensembl ids
+pam50_ens <- clusterProfiler::bitr(pam50$SYMBOL, fromType = "SYMBOL", toType = "ENSEMBL", OrgDb = 'org.Hs.eg.db')
+
+#calculate the overlap with the PAM50 signature 
+overlap_pam50 <- calculate_overlap_coefficients(selection_results, custom_lists = list('PAM50' = pam50_ens$ENSEMBL, 'DEGS' = deg_list))
+plot_overlap_heatmaps(overlap_pam50)
+```
+Finally, we can see the exact numbers of overlapping features by producing an UpSet plot: 
+```{r}
+plot_upset(selection_results, custom_lists = list('PAM50' = pam50_ens$ENSEMBL, 'DEGS' = deg_list))
+```
+
+
+## 3.4 Gene Lists Annotation 
+For the enrichment analysis and subsequent biological interpretation it is convenient to convert gene identifiers to others that are appropriate/useful in different situations. To do so we can do the following: 
+```{r}
+# remove version number from the ensembl ids
+background <- as.character(colnames(vsd_matrix))
+background <- gsub("\\..*", "", background)
+custom_list <- list('background' = background,
+                    'DEGs' = deg_list)
+
+ah <- AnnotationHub::AnnotationHub()
+human_ens <- AnnotationHub::query(ah, c("Homo sapiens", "EnsDb"))
+human_ens <- human_ens[['AH98047']]
+annotations_ahb <- ensembldb::genes(human_ens, return.type = "data.frame") %>%
+  dplyr::select(gene_id,gene_name,entrezid,gene_biotype)
+
+annotations_df <- annotate_gene_lists(pipeline_results = selection_results,
+                                      annotations_ahb = annotations_ahb,
+                                      format = 'ensembl_id',
+                                      custom_lists = custom_list)
+```
+This returns an object of class AnnotatedGeneLists containing gene symbol, ENSEMBL ID and ENTREZ ID for the selected features as well as background list and DEGs list. 
+
+## 3.5 Gene Ontology Enrichment 
+Now we will do Gene Ontology Enrichment analysis to mine the pathways relevant to our biological question. To do so we can call the function: 
+```{r}
+# perform GO Analysis
+annotated_GO_inbuilt <- GO_enrichment_analysis(annotations_df,
+                                       list_type = 'inbuilt', #run GO enrichment on inbuilt  selected features
+                                       keyType = 'ENSEMBL', # run analysis with ENSEMBLIDs
+                                       background = background,
+                                       ont = 'BP') # run BP ontology
+
+annotated_GO_permutation <- GO_enrichment_analysis(annotations_df,
+                                               list_type = 'permutation', #run GO enrichment on permutation based selected features
+                                               keyType = 'ENSEMBL', # run analysis with ENSEMBLIDs
+                                               background = background,
+                                               ont = 'BP') # run BP ontology
+
+```
+
+So far inbuilt feature importance looked promising, so now we can inspect what GO terms are enriched in every gene list: 
+
+```{r message=FALSE, echo=FALSE}
+# Create the dot plot with sorting and subsetting within the plot
+# Create the dot plot
+# boruta
+ggplot(data = annotated_GO_inbuilt$boruta@result %>% 
+         arrange(pvalue) %>% 
+         head(10) %>% 
+         mutate(GeneCount = as.numeric(gsub("/.*$", "", GeneRatio))),
+       aes(x = reorder(Description, -log10(pvalue)), y = -log10(pvalue))) +
+  geom_point(aes(size = GeneCount, color = pvalue)) +
+  scale_color_gradient(low = "red", high = "blue") +
+  scale_size_continuous(range = c(3, 9)) +
+  #geom_text(aes(label = GeneRatio), vjust = -1) +
+  coord_flip() +
+  xlab("Top 10 GO Term Descriptions") +
+  ylab("-log10(pvalue)") +
+  ggtitle('Boruta List') +
+  theme_minimal()
+```
+```{r message=FALSE, echo=FALSE}
+# DEGs
+ggplot(data = annotated_GO_inbuilt$DEGs@result %>% 
+         arrange(pvalue) %>% 
+         head(10) %>% 
+         mutate(GeneCount = as.numeric(gsub("/.*$", "", GeneRatio))),
+       aes(x = reorder(Description, -log10(pvalue)), y = -log10(pvalue))) +
+  geom_point(aes(size = GeneCount, color = pvalue)) +
+  scale_color_gradient(low = "red", high = "blue") +
+  scale_size_continuous(range = c(3, 9)) +
+  #geom_text(aes(label = GeneRatio), vjust = -1) +
+  coord_flip() +
+  xlab("Top 10 GO Term Descriptions") +
+  ylab("-log10(pvalue)") +
+  ggtitle('DEGs List') +
+  theme_minimal()
+```
+```{r message=FALSE, echo=FALSE}
+# Lasso 
+ggplot(data = annotated_GO_inbuilt$Lasso@result %>% 
+         arrange(pvalue) %>% 
+         head(10) %>% 
+         mutate(GeneCount = as.numeric(gsub("/.*$", "", GeneRatio))),
+       aes(x = reorder(Description, -log10(pvalue)), y = -log10(pvalue))) +
+  geom_point(aes(size = GeneCount, color = pvalue)) +
+  scale_color_gradient(low = "red", high = "blue") +
+  scale_size_continuous(range = c(3, 9)) +
+  #geom_text(aes(label = GeneRatio), vjust = -1) +
+  coord_flip() +
+  xlab("Top 10 GO Term Descriptions") +
+  ylab("-log10(pvalue)") +
+  ggtitle('Lasso List') +
+  theme_minimal()
+```
+```{r message=FALSE, echo=FALSE}
+ggplot(data = annotated_GO_inbuilt$RandomForest@result %>% 
+         arrange(pvalue) %>% 
+         head(10) %>% 
+         mutate(GeneCount = as.numeric(gsub("/.*$", "", GeneRatio))),
+       aes(x = reorder(Description, -log10(pvalue)), y = -log10(pvalue))) +
+  geom_point(aes(size = GeneCount, color = pvalue)) +
+  scale_color_gradient(low = "red", high = "blue") +
+  scale_size_continuous(range = c(3, 9)) +
+  #geom_text(aes(label = GeneRatio), vjust = -1) +
+  coord_flip() +
+  xlab("Top 10 GO Term Descriptions") +
+  ylab("-log10(pvalue)") +
+  ggtitle('Random Forest List') + 
+  theme_minimal()
+```
+```{r}
+ggplot(data = annotated_GO_inbuilt$RandomForest@result %>% 
+         arrange(pvalue) %>% 
+         head(10) %>% 
+         mutate(GeneCount = as.numeric(gsub("/.*$", "", GeneRatio))),
+       aes(x = reorder(Description, -log10(pvalue)), y = -log10(pvalue))) +
+  geom_point(aes(size = GeneCount, color = pvalue)) +
+  scale_color_gradient(low = "red", high = "blue") +
+  scale_size_continuous(range = c(3, 9)) +
+  #geom_text(aes(label = GeneRatio), vjust = -1) +
+  coord_flip() +
+  xlab("Top 10 GO Term Descriptions") +
+  ylab("-log10(pvalue)") +
+  ggtitle('Univariate List') +
+  theme_minimal()
+```
+
+Looking at top 10 enriched pathways, boruta seems to be the one that has the most relevant ones. For example, we can see here sprouting angiogenesis regulation terms that is related to metastasis spread. Additionally, such terms as glycosaminoglycan metabolic process and especially apoptotic p53 pathway are all of high relevance in relation to cancer. 
+
+## 3.6 Quantification of Children Nodes of Parent Node of Interest 
+Additionally, we can quantify how many of the children nodes of a parent node of interest are there in our list. For example, we can take two relevant broad GO Biological Process (BP) terms that are cell cycle regulation (GO:0051726) and immune response (GO:0006955). 
+```{r}
+annot_child_fractions_inbuilt <- compute_GO_child_term_metrics(GO_data = annotated_GO_inbuilt,
+                              GO_terms = c("GO:0051726", "GO:0006955"),
+                              plot = TRUE)
+
+annot_child_fractions_permut <- compute_GO_child_term_metrics(GO_data = annotated_GO_permutation,
+                              GO_terms = c("GO:0051726", "GO:0006955"),
+                              plot = TRUE)
+```
+Here, once again we see that in terms of fractions of the parent terms of interest, boruta seems to be performing very well for both 'immune process' and 'cell cycle regulation terms'. 
+
+## 3.7 Semantic Similarity Analysis 
+Finally, we can now perform semantic similarity (SS) analysis of identified GO terms. To do that we will run this: 
+```{r}
+# perform SS analysis
+hmap_inbuilt <- run_simplify_enrichment(annotated_GO_inbuilt,
+                                method = 'louvain',
+                                measure = 'Rel',
+                                ont = 'BP',
+                                padj_column = 'pvalue',
+                                padj_cutoff = 0.01)
+
+hmap_permutation <- run_simplify_enrichment(annotated_GO_permutation,
+                                        method = 'louvain',
+                                        measure = 'Jiang',
+                                        ont = 'BP',
+                                        padj_column = 'pvalue',
+                                        padj_cutoff = 0.01)
+```
+After performing the SS analysis, we can observe that there are 6 clusters in total. By examining word clouds there are two clusters of interest: cluster 4 containing humoral immunity and cell signal transduction  terms, and cluster 5 that contains terms related to glycosaminoglycan and other metabolism-related terms. If we look at the significance and fraction heatmap on the left we see that while DEGs list is significant everywhere, without any specificity, boruta is significantly enriched in these two clusters. 
+
+# 4. Picking the Winner and Conclusion 
+After having completed the entire analysis we can now pick the winner among the lists. From different points of view boruta seems to be the best because: 
+1. It has highest ML performance on both CV and test sets; 
+2. Boruta has more relevant GO BP terms for differentiation between molecular subtypes that are related to cancer cell metabolism, apoptosis and angiogenesis; 
+3. It has higher fractions of parent terms of interest in comparison to other lists;  
+4. In terms of Semantic Similarity analysis it is more specific to immune response-related terms and metabolism terms, as  compared to DEGs that result in broad GO BP terms; 
+5. In comparison to DEGs list it is much shorter and more manageable for the downstream analysis and interpretation 
+With this boruta seems to be the best candidate for downstream analysis and probably targeted experiments to establish biomarkers. 
+With all this in mind, we can clearly say that the most suitable list for the further investigation is boruta. 
+```{r}
+utils::sessionInfo()
+```

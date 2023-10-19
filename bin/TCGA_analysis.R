@@ -1,3 +1,4 @@
+GeneSelectR::set_reticulate_python()
 library(dplyr)
 library(GeneSelectR)
 library(DESeq2)
@@ -41,15 +42,16 @@ dds <- DESeq(dds)
 
 # Get DE results
 res <- results(dds)
-filtered_res <- subset(res, padj < 0.0001 & abs(log2FoldChange) > log2(5))
+filtered_res <- subset(res, padj < 0.001 & abs(log2FoldChange) > log2(5))
 filtered_df <- as.data.frame(filtered_res)
+deg_list <- rownames(filtered_df)
 # Extract VST (Variance-Stabilized Transformed) Data
 vsd <- vst(dds, blind = FALSE)  # blind=FALSE uses sample information in transformation
 vsd_matrix <- assay(vsd)
 vsd_matrix <- t(vsd_matrix)
 
 # do a PCA of VST counts
-pca_res <- prcomp(t(vsd_matrix))
+pca_res <- prcomp(vsd_matrix)
 # Calculate explained variance
 explained_var <- round(100 * (pca_res$sdev^2 / sum(pca_res$sdev^2)), 1)
 # Plot using ggplot2
@@ -59,7 +61,7 @@ ggplot() +
     x = paste0("PC1: ", explained_var[1], "% variance"),
     y = paste0("PC2: ", explained_var[2], "% variance"),
     title = "PCA of DESeq2 Normalized Counts"
-  ) #+
+  ) +
   #scale_color_manual(values = c("red", "blue",'darkgreen','purple')) +  # Replace with your color scheme
   theme_minimal()
 
@@ -79,7 +81,7 @@ saveRDS(sample_metadata, file = file.path(data_dir, 'sample_metadata.rds'))
 # 3. GeneSelectR Analysis
 ################################################################################
 GeneSelectR::set_reticulate_python()
-library(GeneSelectR)
+
 exp <- read.csv(file.path(data_dir, 'normalized_vst_matrix.csv'))
 rownames(exp) <- exp$X
 exp$X <- NULL
@@ -113,3 +115,72 @@ overlap <- calculate_overlap_coefficients(selection_results)
 plot_overlap_heatmaps(overlap)
 
 #inspect overlap with DEGs
+overlap_degs <- calculate_overlap_coefficients(selection_results, custom_lists = list('DEGS' = deg_list))
+plot_overlap_heatmaps(overlap_degs)
+
+# annotate the lists
+# fecth the backfround list
+background <- as.character(colnames(vsd_matrix))
+
+# remove version number from the ensembl ids
+background <- gsub("\\..*", "", background)
+
+# annotate the lists
+ah <- AnnotationHub::AnnotationHub()
+human_ens <- AnnotationHub::query(ah, c("Homo sapiens", "EnsDb"))
+human_ens <- human_ens[['AH98047']]
+annotations_ahb <- ensembldb::genes(human_ens, return.type = "data.frame") %>%
+  dplyr::select(gene_id,gene_name,entrezid,gene_biotype)
+
+custom_list <- list('background' = background,
+                    'DEGs' = deg_list)
+
+annotations_df <- annotate_gene_lists(pipeline_results = selection_results,
+                                      annotations_ahb = annotations_ahb,
+                                      format = 'ensembl_id',
+                                      custom_lists = custom_list)
+
+# perform GO Analysis
+annotated_GO_inbuilt <- GO_enrichment_analysis(annotations_df,
+                                       list_type = 'inbuilt', #run GO enrichment on permutation based selected features
+                                       keyType = 'ENSEMBL', # run analysis with ENSEMBLIDs
+                                       background = background,
+                                       ont = 'BP') # run BP ontology
+
+annotated_GO_permutation <- GO_enrichment_analysis(annotations_df,
+                                               list_type = 'permutation', #run GO enrichment on permutation based selected features
+                                               keyType = 'ENSEMBL', # run analysis with ENSEMBLIDs
+                                               background = background,
+                                               ont = 'BP') # run BP ontology
+
+# perform SS analysis
+# simplifyEnrichment produces a heatmap
+hmap_inbuilt <- run_simplify_enrichment(annotated_GO_inbuilt,
+                                method = 'louvain',
+                                measure = 'Rel',
+                                ont = 'BP',
+                                padj_column = 'pvalue',
+                                padj_cutoff = 0.01)
+
+hmap_permutation <- run_simplify_enrichment(annotated_GO_permutation,
+                                        method = 'louvain',
+                                        measure = 'Jiang',
+                                        ont = 'BP',
+                                        padj_column = 'pvalue',
+                                        padj_cutoff = 0.01)
+
+
+# the best so far:
+# hmap_inbuilt <- run_simplify_enrichment(annotated_GO_inbuilt,
+#                                         method = 'louvain',
+#                                         measure = 'Jiang',
+#                                         ont = 'BP',
+#                                         padj_column = 'pvalue',
+#                                         padj_cutoff = 0.01)
+#
+# hmap_permutation <- run_simplify_enrichment(annotated_GO_permutation,
+#                                             method = 'louvain',
+#                                             measure = 'Jiang',
+#                                             ont = 'BP',
+#                                             padj_column = 'pvalue',
+#                                             padj_cutoff = 0.01)

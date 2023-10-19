@@ -6,3 +6,5 @@ data/clinical.csv
 data/melanoma_data.rds
 raw-data/TCGA-BRCA/
 raw-data/normalized_vst_matrix.csv
+/bin/GeneSelectR_TCGA_BRCA_example_cache
+/docs/GeneSelectR_TCGA_BRCA_example_files
