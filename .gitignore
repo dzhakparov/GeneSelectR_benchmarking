@@ -8,3 +8,4 @@ raw-data/TCGA-BRCA/
 raw-data/normalized_vst_matrix.csv
 /bin/GeneSelectR_TCGA_BRCA_example_cache
 /docs/GeneSelectR_TCGA_BRCA_example_files
+/docs/GeneSelectR_TCGA_BRCA_example_cache

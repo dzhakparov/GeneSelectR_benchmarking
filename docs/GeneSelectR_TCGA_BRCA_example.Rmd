@@ -3,12 +3,16 @@ title: "GeneSelectR Application on TCGA-BRCA Dataset"
 author: "Damir Zhakparov"
 date: "`r Sys.Date()`"
 output:
-  word_document:
+  html_document:
     toc: yes
     toc_depth: '2'
+    df_print: paged
   pdf_document:
     toc: yes
     toc_depth: 2
+  word_document:
+    toc: yes
+    toc_depth: '2'
 ---
 
 ```{r setup, include=FALSE}
@@ -136,6 +140,8 @@ filtered_df <- as.data.frame(filtered_res)
 And store it in a separate vector: 
 ```{r}
 deg_list <- rownames(filtered_df)
+# Remove the two digits after ensembl id 
+deg_list <- gsub("\\.\\d{2}", "", deg_list)
 ```
 
 
@@ -213,8 +219,8 @@ selection_results <- convert_ensembl_to_symbol(selection_results)
 ```
 
 
-```{r echo = FALSE, message = FALSE}
-selection_results <- readRDS(file = file.path('../results/selection_results.rds'))
+```{r echo = FALSE, message = FALSE, eval=FALSE}
+#selection_results <- readRDS(file = file.path('../results/selection_results.rds'))
 ```
 
 
@@ -259,7 +265,7 @@ ENSG00000005156 (LIG3), ENSG00000006534 (ALDH3B1), ENSG00000005100 (DHX33).
 ## 3.3 Overlap between Gene Lists and DGE list 
 It might be interesting to see if there is any overlap between the feature selection lists also including the list of differentially expressed genes. 
 Let's first extract the list of DEGs: 
-```{r}
+```{r eval=FALSE}
 deg_list <- rownames(filtered_df)
 ```
 Then we can calculate the overlap coefficients and plot them: 
@@ -306,7 +312,7 @@ annotations_ahb <- ensembldb::genes(human_ens, return.type = "data.frame") %>%
 
 annotations_df <- annotate_gene_lists(pipeline_results = selection_results,
                                       annotations_ahb = annotations_ahb,
-                                      format = 'ensembl_id',
+                                      format = 'ENSEMBL',
                                       custom_lists = custom_list)
 ```
 This returns an object of class AnnotatedGeneLists containing gene symbol, ENSEMBL ID and ENTREZ ID for the selected features as well as background list and DEGs list. 
