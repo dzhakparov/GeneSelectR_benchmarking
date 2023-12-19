@@ -3,16 +3,16 @@ title: "GeneSelectR Application on TCGA-BRCA Dataset"
 author: "Damir Zhakparov"
 date: "`r Sys.Date()`"
 output:
+  word_document:
+    toc: yes
+    toc_depth: '2'
+  pdf_document:
+    toc: yes
+    toc_depth: 2
   html_document:
     toc: yes
     toc_depth: '2'
     df_print: paged
-  pdf_document:
-    toc: yes
-    toc_depth: 2
-  word_document:
-    toc: yes
-    toc_depth: '2'
 ---
 
 ```{r setup, include=FALSE}
